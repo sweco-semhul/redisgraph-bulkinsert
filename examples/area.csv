@@ -1,0 +1,4 @@
+area_id;area_category_id;name;active_from;active_to
+1;1;Test area 1;2019-04-01T18:00:00Z;9999-12-31T23:59:59Z
+2;1;Test area 2;2019-04-01T18:00:00Z;9999-12-31T23:59:59Z
+3;2;Test area 3;2019-04-01T18:00:00Z;9999-12-31T23:59:59Z

@@ -1,0 +1,67 @@
+  redis:
+    url: "localhost:6379"
+    # username: ""
+    # password: ""
+
+# Example data 
+#
+# area.csv
+#     areas, with foreign key to area_category.csv
+# area_category.csv
+#   area_categories
+#
+# Example maps files as:
+#   (:area{area_id, area_category_id, active_from, active_from}) -[:address_category]-> (:address_category{area_category_id, name})
+#
+  files:
+    - filename: "examples/area_category.csv"
+      separator: ";"
+      columns:       
+        - "area_category_id"     
+        - "name"
+      nodes:
+        - label: "address_category"
+          filters:
+            - "area_category_id < 2"
+          properties:
+            - colname: "area_category_id"
+              type: "numeric"
+            - colname: "name"
+              type: "string"       
+
+    - filename: "examples/area.csv"
+      separator: ";"
+      columns:
+        - "area_id"
+        - "area_category_id"
+        - "active_from"
+        - "active_to"
+      nodes:      
+        - label: "area"
+          properties:
+            - colname: "area_id"
+              type: "numeric"
+            - colname: "area_category_id"
+              type: "numeric"
+            - colname: "active_from"
+              type: "numeric"
+              converter: "timestamp2numeric"
+            - colname: "active_to"
+              type: "numeric"
+              converter: "timestamp2numeric"                      
+      relations:
+        - label: "address_category"
+          prroperties:
+            - colname: "area_id"
+              type: "numeric" 
+          src: 
+            label: "area"
+            value: "area_id"
+          dst:
+            label: "address_category"
+            value: "address_category_id"        
+
+
+    
+
+
