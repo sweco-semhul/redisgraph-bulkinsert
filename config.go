@@ -14,9 +14,10 @@ type Config struct {
 }
 
 type Redis struct {
-	Url      string
-	Username string
-	Password string
+	Url       string
+	Username  string
+	Password  string
+	GraphName string
 }
 
 type File struct {

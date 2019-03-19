@@ -2,6 +2,7 @@
     url: "localhost:6379"
     # username: ""
     # password: ""
+    graphname: "AREA"
 
 # Example data 
 #
