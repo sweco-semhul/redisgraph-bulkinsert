@@ -23,6 +23,7 @@ type Redis struct {
 type File struct {
 	Filename  string
 	Separator string
+	Header    bool
 	Columns   []string
 	Nodes     []NodeMapping
 	Relations []RelationMapping

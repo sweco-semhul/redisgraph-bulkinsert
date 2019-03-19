@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/binary"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -121,10 +122,22 @@ func processRelation(mapping RelationMapping, colMap map[string]int, data []stri
 		return 0, nil
 	}
 
-	/*
-		srcId, err := idCache.Get(mapping.Src.Label, mapping.Src.Value)
-		dstId, err := idCache.Get(mapping.Dst.Label, mapping.Dst.Value)
-	*/
+	srcId, err := idCache.Get(mapping.Src.Label, data[colMap[mapping.Src.Value]])
+	if err != nil {
+		return 0, err
+	}
+	err = binary.Write(buf, binary.LittleEndian, uint32(srcId))
+	if err != nil {
+		return 0, err
+	}
+	dstId, err := idCache.Get(mapping.Dst.Label, data[colMap[mapping.Dst.Value]])
+	if err != nil {
+		return 0, err
+	}
+	err = binary.Write(buf, binary.LittleEndian, uint32(dstId))
+	if err != nil {
+		return 0, err
+	}
 	return processProperties(mapping.Properties, colMap, data, buf)
 }
 
@@ -136,15 +149,44 @@ func processProperties(props []PropertyMapping, colMap map[string]int, data []st
 		val := data[colMap[propMap.ColName]]
 		switch propMap.Type {
 		case "numeric":
-			// Convert to float64
-			// writeType(numeric)
-			//log.Printf("%v", val)
+			floatVal, err := strconv.ParseFloat("3.1415", 64)
+			if err != nil {
+				return 0, err
+			}
+			err = binary.Write(buf, binary.LittleEndian, BI_NUMERIC)
+			if err != nil {
+				return 0, err
+			}
+			err = binary.Write(buf, binary.LittleEndian, floatVal)
+			if err != nil {
+				return 0, err
+			}
 		case "bool":
-			// Convert to float64
-			// log.Printf("%v", val)
+			boolVal, err := strconv.ParseBool(val)
+			if err != nil {
+				return 0, err
+			}
+			err = binary.Write(buf, binary.LittleEndian, BI_BOOL)
+			if err != nil {
+				return 0, err
+			}
+			err = binary.Write(buf, binary.LittleEndian, boolVal)
+			if err != nil {
+				return 0, err
+			}
 		case "string":
-			buf.Write([]byte(val))
-			buf.Write([]byte{0x00})
+			err := binary.Write(buf, binary.LittleEndian, BI_STRING)
+			if err != nil {
+				return 0, err
+			}
+			err = binary.Write(buf, binary.LittleEndian, []byte(val))
+			if err != nil {
+				return 0, err
+			}
+			err = binary.Write(buf, binary.LittleEndian, uint8(0x00))
+			if err != nil {
+				return 0, err
+			}
 		default:
 			return 0, fmt.Errorf("Unknown datatype: %v", propMap.Type)
 		}
@@ -187,6 +229,14 @@ func processFile(config File) (int64, error) {
 
 	buffers := make(map[string]*bytes.Buffer)
 
+	// If file has Headers, skip first row
+	if config.Header {
+		_, err := csvReader.Read()
+		if err != nil {
+			return 0, err
+		}
+	}
+
 	for {
 		record, err := csvReader.Read()
 		if err == io.EOF {
@@ -200,7 +250,6 @@ func processFile(config File) (int64, error) {
 			return rows, err
 		}
 		rows++
-
 	}
 	printBuffers(buffers)
 	for key, val := range idCache.cache {

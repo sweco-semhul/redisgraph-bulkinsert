@@ -17,13 +17,14 @@
   files:
     - filename: "examples/area_category.csv"
       separator: ";"
+      header: true
       columns:       
         - "area_category_id"     
         - "name"
       nodes:
-        - label: "address_category"
+        - label: "area_category"
           filters:
-            - "area_category_id < 2"
+            - "area_category_id < 3"
           properties:
             - colname: "area_category_id"
               type: "numeric"
@@ -32,6 +33,7 @@
 
     - filename: "examples/area.csv"
       separator: ";"
+      header: true
       columns:
         - "area_id"
         - "area_category_id"
@@ -51,16 +53,16 @@
               type: "numeric"
               converter: "timestamp2numeric"                      
       relations:
-        - label: "address_category"
-          prroperties:
+        - label: "area_category"
+          properties:
             - colname: "area_id"
               type: "numeric" 
           src: 
             label: "area"
             value: "area_id"
           dst:
-            label: "address_category"
-            value: "address_category_id"        
+            label: "area_category"
+            value: "area_category_id"        
 
 
     
