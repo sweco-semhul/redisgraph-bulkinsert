@@ -14,7 +14,7 @@ import (
 	"strings"
 )
 
-func getReader(filename string) (*csv.Reader, error) {
+func getReader(filename string, separator string) (*csv.Reader, error) {
 	infile, err := os.Open(filename)
 	if err != nil {
 		return nil, err
@@ -33,7 +33,7 @@ func getReader(filename string) (*csv.Reader, error) {
 	csvReader := csv.NewReader(reader)
 	// TODO: set from file metadata
 	csvReader.Comment = '#'
-	csvReader.Comma = '\t'
+	csvReader.Comma = ([]rune(separator))[0]
 
 	return csvReader, nil
 }
@@ -129,6 +129,9 @@ func processRelation(mapping RelationMapping, colMap map[string]int, data []stri
 }
 
 func processProperties(props []PropertyMapping, colMap map[string]int, data []string, buf *bytes.Buffer) (int, error) {
+	if len(data) < len(props) {
+		return 0, fmt.Errorf("Data contains fewer columns that mapping.")
+	}
 	for _, propMap := range props {
 		val := data[colMap[propMap.ColName]]
 		switch propMap.Type {
@@ -168,16 +171,16 @@ func printBuffers(buffers map[string]*bytes.Buffer) {
 }
 
 var (
-	// Global idCache
-	idCache  IdCache                  = NewIdCache()
-	buffers  map[string]*bytes.Buffer = make(map[string]*bytes.Buffer)
-	counters map[string]int           = make(map[string]int)
+	// global node index
+	idCache IdCache = NewIdCache()
+	//buffers  map[string]*bytes.Buffer = make(map[string]*bytes.Buffer)
+	counters map[string]int = make(map[string]int)
 )
 
 func processFile(config File) (int64, error) {
 	log.Printf("Processing: %v", config.Filename)
 	rows := int64(0)
-	csvReader, err := getReader(config.Filename)
+	csvReader, err := getReader(config.Filename, config.Separator)
 	if err != nil {
 		return rows, err
 	}
@@ -198,16 +201,12 @@ func processFile(config File) (int64, error) {
 		}
 		rows++
 
-		if rows == 50 {
-			break
-		}
 	}
 	printBuffers(buffers)
 	for key, val := range idCache.cache {
 		log.Printf("key: %v val: %v", key, val)
 	}
-	log.Printf("Processed: %v with %v rows", config.Filename, rows)
-	return rows, nil
+	return 0, nil
 }
 
 func EnvString(key string, val string) string {
@@ -241,6 +240,12 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
+
+	dir, err := os.Getwd()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Println(dir)
 
 	conf, err := NewConfig(os.Args[1])
 	if err != nil {

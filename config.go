@@ -21,6 +21,7 @@ type Redis struct {
 
 type File struct {
 	Filename  string
+	Separator string
 	Columns   []string
 	Nodes     []NodeMapping
 	Relations []RelationMapping
@@ -75,6 +76,9 @@ func NewConfig(fileName string) (Config, error) {
 }
 
 func validate(config Config) error {
+	if len(config.Files) == 0 {
+		return fmt.Errorf("No files specified")
+	}
 	for _, file := range config.Files {
 		err := validateFile(file)
 		if err != nil {
@@ -85,6 +89,13 @@ func validate(config Config) error {
 }
 
 func validateFile(file File) error {
+
+	if len(file.Filename) == 0 {
+		return fmt.Errorf("Filename not specified")
+	}
+	if len(file.Separator) == 0 {
+		return fmt.Errorf("Separator not specified")
+	}
 
 	// Check fileExistance
 	if _, err := os.Stat(file.Filename); err != nil {
