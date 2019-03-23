@@ -22,9 +22,9 @@
         - "area_category_id"     
         - "name"
       nodes:
-        - label: "area_category"
-          filters:
-            - "area_category_id < 3"
+        - label: "areaCategory"
+          # filters:
+          #  - "area_category_id < 3"
           properties:
             - colname: "area_category_id"
               type: "numeric"
@@ -54,14 +54,14 @@
               converter: "timestamp2numeric"                      
       relations:
         - label: "area_category"
-          properties:
-            - colname: "area_id"
-              type: "numeric" 
+          #properties:
+          #  - colname: "area_id"
+          #    type: "numeric" 
           src: 
             label: "area"
             value: "area_id"
           dst:
-            label: "area_category"
+            label: "areaCategory"
             value: "area_category_id"        
 
 

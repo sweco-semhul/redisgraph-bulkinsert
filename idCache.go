@@ -1,6 +1,9 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"log"
+)
 
 type CacheKey struct {
 	label string
@@ -22,8 +25,10 @@ func NewIdCache() IdCache {
 func (idc IdCache) Get(label string, id string) (int64, error) {
 	val, ok := idc.cache[CacheKey{label: label, id: id}]
 	if !ok {
+		log.Printf("idcache lookup: {%v,%v}=>UNMAPPED, label, id")
 		return 0, fmt.Errorf("No node index found for %v:%v", label, id)
 	}
+	log.Printf("idcache lookup: {%v,%v}=>%v", label, id, val)
 	return int64(val), nil
 }
 

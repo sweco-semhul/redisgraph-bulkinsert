@@ -43,12 +43,28 @@ type NodeMapping struct {
 	Properties []PropertyMapping
 }
 
+func (nm NodeMapping) GetPropertyNames() []string {
+	var result []string
+	for _, val := range nm.Properties {
+		result = append(result, val.ColName)
+	}
+	return result
+}
+
 type RelationMapping struct {
 	Label      string
 	Filters    []string
 	Src        EntityReference
 	Dst        EntityReference
 	Properties []PropertyMapping
+}
+
+func (rm RelationMapping) GetPropertyNames() []string {
+	var result []string
+	for _, val := range rm.Properties {
+		result = append(result, val.ColName)
+	}
+	return result
 }
 
 type EntityReference struct {

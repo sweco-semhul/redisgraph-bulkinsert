@@ -13,6 +13,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/gomodule/redigo/redis"
+)
+
+const (
+	BI_NULL    uint8 = 0
+	BI_BOOL    uint8 = 1
+	BI_NUMERIC uint8 = 2
+	BI_STRING  uint8 = 3
 )
 
 func getReader(filename string, separator string) (*csv.Reader, error) {
@@ -68,12 +77,14 @@ func filterMatch(filter string, colMap map[string]int, data []string) (bool, err
 	}
 }
 
-func processNodes(config File, data []string, buffers map[string]*bytes.Buffer) (int, error) {
+func processNodes(config File, data []string) (int, error) {
+	// WriteHeader
 	for _, nodeMapping := range config.Nodes {
 		buffer, exists := buffers[nodeMapping.Label]
 		if !exists {
 			buffer = &bytes.Buffer{}
 			buffers[nodeMapping.Label] = buffer
+			writeHeader(buffer, nodeMapping.Label, nodeMapping.GetPropertyNames())
 		}
 		_, err := processNode(nodeMapping, config.ColumNameIndexMap(), data, buffer)
 		if err != nil {
@@ -94,18 +105,19 @@ func processNode(mapping NodeMapping, colMap map[string]int, data []string, buf 
 	}
 	// Use first column as id when caching
 	idCache.Put(mapping.Label, data[colMap[mapping.Properties[0].ColName]])
-
+	counters[mapping.Label]++
 	return processProperties(mapping.Properties, colMap, data, buf)
 }
 
-func processRelations(config File, data []string, buffers map[string]*bytes.Buffer) (int, error) {
-	for _, nodeMapping := range config.Relations {
-		buffer, exists := buffers[nodeMapping.Label]
+func processRelations(config File, data []string) (int, error) {
+	for _, relMapping := range config.Relations {
+		buffer, exists := buffers[relMapping.Label]
 		if !exists {
 			buffer = &bytes.Buffer{}
-			buffers[nodeMapping.Label] = buffer
+			buffers[relMapping.Label] = buffer
+			writeHeader(buffer, relMapping.Label, relMapping.GetPropertyNames())
 		}
-		_, err := processRelation(nodeMapping, config.ColumNameIndexMap(), data, buffer)
+		_, err := processRelation(relMapping, config.ColumNameIndexMap(), data, buffer)
 		if err != nil {
 			return 0, err
 		}
@@ -121,7 +133,6 @@ func processRelation(mapping RelationMapping, colMap map[string]int, data []stri
 	if !match {
 		return 0, nil
 	}
-
 	srcId, err := idCache.Get(mapping.Src.Label, data[colMap[mapping.Src.Value]])
 	if err != nil {
 		return 0, err
@@ -138,6 +149,7 @@ func processRelation(mapping RelationMapping, colMap map[string]int, data []stri
 	if err != nil {
 		return 0, err
 	}
+	counters[mapping.Label]++
 	return processProperties(mapping.Properties, colMap, data, buf)
 }
 
@@ -194,40 +206,154 @@ func processProperties(props []PropertyMapping, colMap map[string]int, data []st
 	return 1, nil
 }
 
-func processRow(config File, row []string, buffers map[string]*bytes.Buffer) error {
-	_, err := processNodes(config, row, buffers)
+func writeHeader(buf *bytes.Buffer, label string, propNames []string) error {
+	var err error
+	// label
+	err = binary.Write(buf, binary.LittleEndian, []byte(string(label)))
 	if err != nil {
 		return err
 	}
-	_, err = processRelations(config, row, buffers)
+	err = binary.Write(buf, binary.LittleEndian, uint8(0x00))
 	if err != nil {
 		return err
 	}
+
+	// propertyCount
+	err = binary.Write(buf, binary.LittleEndian, uint32(len(propNames)))
+	if err != nil {
+		return err
+	}
+
+	// property names
+	for _, propName := range propNames {
+		err = binary.Write(buf, binary.LittleEndian, []byte(propName))
+		if err != nil {
+			return err
+		}
+		err = binary.Write(buf, binary.LittleEndian, uint8(0x00))
+		if err != nil {
+			return err
+		}
+	}
+	log.Printf("Header written: [:%v {%v}", label, propNames)
 	return nil
 }
 
-func printBuffers(buffers map[string]*bytes.Buffer) {
+func processRow(config File, row []string, rowNum int64) error {
+	_, err := processNodes(config, row)
+	if err != nil {
+		return err
+	}
+	_, err = processRelations(config, row)
+	if err != nil {
+		return err
+	}
+	flushBuffers(false, config)
+	return nil
+}
+
+// flushBuffers flushes buffers
+func flushBuffers(force bool, config File) {
+	log.Printf("Flushing nodes")
+	for _, nm := range config.Nodes {
+		count := counters[nm.Label]
+		if force || (count > 0 && count%50000 == 0) {
+			buffer := buffers[nm.Label]
+			log.Printf("Sending nodes buffer: %20v [count: %6v size: %6v]", nm.Label, count, buffer.Len())
+			sendNodes(redisConn, buffer.Bytes(), count)
+
+			buffer.Reset()
+			counters[nm.Label] = 0
+			err := writeHeader(buffer, nm.Label, nm.GetPropertyNames())
+			if err != nil {
+				log.Fatalf("Error writing header: %v", err)
+			}
+		}
+	}
+
+	log.Printf("Flushing relations")
+	for _, rm := range config.Relations {
+		count := counters[rm.Label]
+		if force || (count > 0 && count%20000 == 0) {
+			buffer := buffers[rm.Label]
+			log.Printf("Sending relations buffer: %20v [count: %6v size: %6v]", rm.Label, count, buffer.Len())
+			sendRelations(redisConn, buffer.Bytes(), count)
+			buffer.Reset()
+			counters[rm.Label] = 0
+			err := writeHeader(buffer, rm.Label, rm.GetPropertyNames())
+			if err != nil {
+				log.Fatalf("Error writing header: %v", err)
+			}
+		}
+	}
+
+}
+
+func sendRelations(conn redis.Conn, buf []byte, count int) {
+	var args = []interface{}{
+		"GIM",
+	}
+
+	if sendBegin == true {
+		args = append(args, []interface{}{"BEGIN", 0, count, 0, 1, buf}...)
+		sendBegin = false
+	} else {
+		args = append(args, []interface{}{0, count, 0, 1, buf}...)
+	}
+
+	if err := conn.Send("GRAPH.BULK", args...); err != nil {
+		log.Fatal(err)
+	}
+	if err := conn.Flush(); err != nil {
+		log.Fatal(err)
+	}
+	reply, err := conn.Receive()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%v", reply)
+
+}
+
+func sendNodes(conn redis.Conn, buf []byte, count int) {
+	var args = []interface{}{
+		"GIM",
+	}
+
+	if sendBegin == true {
+		args = append(args, []interface{}{"BEGIN", count, 0, 1, 0, buf}...)
+		sendBegin = false
+	} else {
+		args = append(args, []interface{}{count, 0, 1, 0, buf}...)
+	}
+
+	if err := conn.Send("GRAPH.BULK", args...); err != nil {
+		log.Fatal(err)
+	}
+	if err := conn.Flush(); err != nil {
+		log.Fatal(err)
+	}
+	reply, err := conn.Receive()
+	if err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("%s", reply)
+
+}
+
+func printBuffers() {
 	for key, val := range buffers {
-		log.Printf("buffer %v has size %v", key, val.Cap())
+		log.Printf("buffer %v: size: %v count: %v", key, val.Cap(), counters[key])
 	}
 }
 
-var (
-	// global node index
-	idCache IdCache = NewIdCache()
-	//buffers  map[string]*bytes.Buffer = make(map[string]*bytes.Buffer)
-	counters map[string]int = make(map[string]int)
-)
-
 func processFile(config File) (int64, error) {
 	log.Printf("Processing: %v", config.Filename)
-	rows := int64(0)
+	row := int64(0)
 	csvReader, err := getReader(config.Filename, config.Separator)
 	if err != nil {
-		return rows, err
+		return row, err
 	}
-
-	buffers := make(map[string]*bytes.Buffer)
 
 	// If file has Headers, skip first row
 	if config.Header {
@@ -245,16 +371,15 @@ func processFile(config File) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
-		err = processRow(config, record, buffers)
+		err = processRow(config, record, row)
 		if err != nil {
-			return rows, err
+			return row, err
 		}
-		rows++
+		row++
+
 	}
-	printBuffers(buffers)
-	for key, val := range idCache.cache {
-		log.Printf("key: %v val: %v", key, val)
-	}
+	flushBuffers(true, config)
+	log.Printf("Processed: %v", row)
 	return 0, nil
 }
 
@@ -279,6 +404,15 @@ func EnvInt(key string, val int) int {
 	return retval
 }
 
+var (
+	// global node index
+	idCache   IdCache                  = NewIdCache()
+	buffers   map[string]*bytes.Buffer = make(map[string]*bytes.Buffer)
+	counters  map[string]int           = make(map[string]int)
+	redisConn redis.Conn               = nil
+	sendBegin bool                     = true
+)
+
 func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: redis_import2pg <configfile>\n")
@@ -290,30 +424,21 @@ func main() {
 		os.Exit(1)
 	}
 
-	dir, err := os.Getwd()
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Println(dir)
-
 	conf, err := NewConfig(os.Args[1])
 	if err != nil {
 		log.Fatalf("Error reading configuration: %v", err)
 	}
 
-	/*
-		conn, err := redis.Dial("tcp", conf.Redis.Url)
-		if err != nil {
-			log.Fatalf("Error connectig to redis: %v", err)
-		}
-		conn.Close()
-	*/
+	redisConn, err = redis.Dial("tcp", conf.Redis.Url)
+	if err != nil {
+		log.Fatalf("Error connectig to redis: %v", err)
+	}
 
 	for _, file := range conf.Files {
 		_, err := processFile(file)
 		if err != nil {
 			log.Fatalf("Unable to process file: %v", err)
 		}
-
 	}
+	redisConn.Close()
 }
