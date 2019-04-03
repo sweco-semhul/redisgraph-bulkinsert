@@ -137,7 +137,7 @@ func processRelation(mapping RelationMapping, colMap map[string]int, data []stri
 	if err != nil {
 		return 0, err
 	}
-	err = binary.Write(buf, binary.LittleEndian, uint32(srcId))
+	err = binary.Write(buf, binary.LittleEndian, uint64(srcId))
 	if err != nil {
 		return 0, err
 	}
@@ -145,7 +145,7 @@ func processRelation(mapping RelationMapping, colMap map[string]int, data []stri
 	if err != nil {
 		return 0, err
 	}
-	err = binary.Write(buf, binary.LittleEndian, uint32(dstId))
+	err = binary.Write(buf, binary.LittleEndian, uint64(dstId))
 	if err != nil {
 		return 0, err
 	}
