@@ -49,16 +49,20 @@ func getReader(filename string, separator string) (*csv.Reader, error) {
 }
 
 func filtersMatch(filters []string, colMap map[string]int, data []string) (bool, error) {
+	if len(filters) == 0 {
+		return true, nil
+	}
+
 	for _, filter := range filters {
 		match, err := filterMatch(filter, colMap, data)
 		if err != nil {
 			return false, err
 		}
-		if !match {
-			return false, nil
+		if match {
+			return true, nil
 		}
 	}
-	return true, nil
+	return false, nil
 }
 
 func filterMatch(filter string, colMap map[string]int, data []string) (bool, error) {
