@@ -15,14 +15,14 @@
 #   (:area{area_id, area_category_id, active_from, active_from}) -[:address_category]-> (:address_category{area_category_id, name})
 #
   files:
-    - filename: "examples/area_category.csv"
+    - filename: "/Users/seponr/Dropbox/redisgraph-bulkinsert/examples/area_category.csv"
       separator: ";"
       header: true
       columns:       
         - "area_category_id"     
         - "name"
       nodes:
-        - label: "areaCategory"
+        AreaCategory:
           # filters:
           #  - "area_category_id < 3"
           properties:
@@ -31,32 +31,28 @@
             - colname: "name"
               type: "string"       
 
-    - filename: "examples/area.csv"
+    - filename: "/Users/seponr/Dropbox/redisgraph-bulkinsert/examples/area.csv"
       separator: ";"
       header: true
       columns:
         - "area_id"
         - "area_category_id"
+        - "name"
         - "active_from"
         - "active_to"
       nodes:      
-        - label: "area"
+        Area:
           properties:
             - colname: "area_id"
               type: "numeric"
             - colname: "area_category_id"
               type: "numeric"
             - colname: "active_from"
-              type: "numeric"
-              converter: "timestamp2numeric"
+              type: "string"              
             - colname: "active_to"
-              type: "numeric"
-              converter: "timestamp2numeric"                      
-      relations:
-        - label: "area_category"
-          #properties:
-          #  - colname: "area_id"
-          #    type: "numeric" 
+              type: "string"                             
+      edges:
+        Area_Category:
           src: 
             label: "area"
             value: "area_id"

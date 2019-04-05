@@ -1,9 +1,8 @@
 package main
 
 import (
-	"bytes"
+	"bufio"
 	"compress/gzip"
-	"encoding/binary"
 	"encoding/csv"
 	"flag"
 	"fmt"
@@ -13,16 +12,256 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gomodule/redigo/redis"
 )
 
-const (
-	BI_NULL    uint8 = 0
-	BI_BOOL    uint8 = 1
-	BI_NUMERIC uint8 = 2
-	BI_STRING  uint8 = 3
-)
+func main() {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: redis_import2pg <configfile>\n")
+		flag.PrintDefaults()
+	}
+	flag.Parse()
+	if len(os.Args) < 2 {
+		flag.Usage()
+		os.Exit(1)
+	}
+
+	conf, err := NewConfig(os.Args[1])
+	if err != nil {
+		log.Fatalf("Error reading configuration: %v", err)
+	}
+
+	process(conf)
+
+}
+
+type Node struct {
+	ID         string
+	Alias      string
+	Label      string
+	Properties map[string]interface{}
+}
+
+func (n Node) Cypher() string {
+	var str strings.Builder
+	str.WriteString("(")
+	str.WriteString(n.Alias)
+	str.WriteString(":")
+	str.WriteString(n.Label)
+	str.WriteString(" ")
+	str.WriteString("{")
+	p := make([]string, 0, len(n.Properties))
+	for k, v := range n.Properties {
+		switch val := v.(type) {
+		case string:
+			p = append(p, fmt.Sprintf("%s:\"%s\"", k, val))
+		case float64, float32:
+			p = append(p, fmt.Sprintf("%s:%f", k, val))
+		default:
+			p = append(p, fmt.Sprintf("%s:%v", k, val))
+		}
+	}
+	str.WriteString(strings.Join(p, ", "))
+	str.WriteString("}")
+	str.WriteString(")")
+	return str.String()
+}
+
+type Edge struct {
+	Label       string
+	Properties  map[string]interface{}
+	SrcLabel    string
+	SrcProperty map[string]interface{}
+	DstLabel    string
+	DstProperty map[string]interface{}
+}
+
+func (e Edge) Cypher() string {
+	var str strings.Builder
+	src := Node{
+		Alias:      "src",
+		Label:      e.SrcLabel,
+		Properties: e.SrcProperty,
+	}
+	dst := Node{
+		Alias:      "dst",
+		Label:      e.DstLabel,
+		Properties: e.DstProperty,
+	}
+	str.WriteString("MATCH ")
+	str.WriteString(src.Cypher())
+	str.WriteString(",")
+	str.WriteString(dst.Cypher())
+	str.WriteString(" CREATE ")
+	str.WriteString("(src)")
+	str.WriteString("-[:")
+	str.WriteString(e.Label)
+	str.WriteString("]->")
+	str.WriteString("(dst)")
+	return str.String()
+}
+
+func process(config Config) {
+	impb := NewImportBuffers()
+
+	for _, fileConfig := range config.Files {
+		impb.AddConfigs(fileConfig)
+		entityChan := processRecord(readFile(fileConfig), fileConfig)
+		//writeData(entityChan, config.Redis, fileConfig)
+		BulkInsert(entityChan, config.Redis, fileConfig, impb)
+	}
+}
+
+func BulkInsert(entityChan chan interface{}, redisConf Redis, fileConf File, impb *ImportBuffers) {
+	conn, err := redis.Dial("tcp", redisConf.Url)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	executeQuery("GRAPH.QUERY", redisConf.GraphName, "CREATE (:Import{id: 1})", conn)
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		for entity := range entityChan {
+			var count, size int
+			switch val := entity.(type) {
+			case Node:
+				count, size = impb.AddNode(val)
+			case Edge:
+				count, size = impb.AddEdge(val)
+			}
+			if count%10000 == 0 {
+				log.Printf("count: %v  size: %v", count, size)
+				impb.PrettyPrint()
+			}
+		}
+		impb.PrettyPrint()
+		wg.Done()
+	}()
+	wg.Wait()
+}
+
+func writeNode() {
+
+}
+
+func writeEdge() {
+
+}
+
+func MergeInsert(entityChan chan interface{}, redisConf Redis, fileConf File) {
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		conn, err := redis.Dial("tcp", redisConf.Url)
+		defer conn.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Create import object (which also creates the graph)
+		executeQuery("GRAPH.QUERY", redisConf.GraphName, "CREATE (:Import {start: '', end: ''})", conn)
+		for label, nodeConf := range fileConf.Nodes {
+			query := fmt.Sprintf("CREATE INDEX ON :%v(%v)", label, nodeConf.Properties[0].ColName)
+			executeQuery("GRAPH.QUERY", redisConf.GraphName, query, conn)
+		}
+
+		for entity := range entityChan {
+			switch v := entity.(type) {
+			case Node:
+				query := fmt.Sprintf("MERGE %v", v.Cypher())
+				executeQuery("GRAPH.QUERY", redisConf.GraphName, query, conn)
+			case Edge:
+				query := fmt.Sprintf("%v", v.Cypher())
+				executeQuery("GRAPH.QUERY", redisConf.GraphName, query, conn)
+			}
+		}
+		wg.Done()
+	}()
+
+	wg.Wait()
+}
+
+//
+
+func executeQuery(cmd string, graphname string, query string, conn redis.Conn) {
+	//log.Printf("execute: %v", query)
+	r, err := redis.Values(conn.Do(cmd, graphname, query))
+	if err != nil {
+		log.Fatalf("Error executing [%v]: %v", query, err)
+	}
+	_, err = redis.Values(r[0], nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	//log.Printf("result: %v", results)
+}
+
+func readFile(config File) chan []string {
+	out := make(chan []string)
+	//defer close(out)
+	go func() {
+
+		log.Printf("Processing: %v", config.Filename)
+
+		csvReader, err := getReader(config.Filename, config.Separator)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if config.Header {
+			_, err := csvReader.Read()
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+		row := 0
+		for {
+			record, err := csvReader.Read()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				log.Fatal(err)
+			}
+			out <- record
+			row++
+		}
+		//log.Printf("Processed: %v", config.Filename)
+		close(out)
+	}()
+	return out
+}
+
+func getRowCount(filename string) (int, error) {
+	infile, err := os.Open(filename)
+	if err != nil {
+		return 0, err
+	}
+	// Uncompress file based on extension
+	var reader io.Reader
+	if filepath.Ext(filename) == ".gz" {
+		reader, err = gzip.NewReader(infile)
+		if err != nil {
+			return 0, err
+		}
+	} else {
+		reader = infile
+	}
+
+	scanner := bufio.NewScanner(reader)
+	rows := 0
+	for scanner.Scan() {
+		rows++
+	}
+	infile.Close()
+	return rows, nil
+}
 
 func getReader(filename string, separator string) (*csv.Reader, error) {
 	infile, err := os.Open(filename)
@@ -43,402 +282,84 @@ func getReader(filename string, separator string) (*csv.Reader, error) {
 	csvReader := csv.NewReader(reader)
 	// TODO: set from file metadata
 	csvReader.Comment = '#'
-	csvReader.Comma = ([]rune(separator))[0]
+	csvReader.Comma = '\t' //([]rune(separator))[0]
 
 	return csvReader, nil
 }
 
-func filtersMatch(filters []string, colMap map[string]int, data []string) (bool, error) {
-	for _, filter := range filters {
-		match, err := filterMatch(filter, colMap, data)
+func processRecord(recordChan chan []string, config File) chan interface{} {
+	entityChan := make(chan interface{})
+
+	colIdx := config.ColumNameIndexMap()
+	go func() {
+		for record := range recordChan {
+			for label, conf := range config.Nodes {
+				entityChan <- Node{
+					ID:         getIDProperty(conf.Properties, colIdx, record),
+					Label:      label,
+					Properties: mapProperties(conf.Properties, colIdx, record),
+				}
+			}
+			for label, conf := range config.Edges {
+				entityChan <- Edge{
+					Label:       label,
+					Properties:  mapProperties(conf.Properties, colIdx, record),
+					SrcLabel:    conf.Src.Label,
+					SrcProperty: getReferenceProperty(conf.Src, colIdx, record),
+					DstLabel:    conf.Dst.Label,
+					DstProperty: getReferenceProperty(conf.Dst, colIdx, record),
+				}
+			}
+		}
+		close(entityChan)
+	}()
+	return entityChan
+}
+
+func getReferenceProperty(er EntityReference, colIdx map[string]int, record []string) map[string]interface{} {
+	val := record[colIdx[er.Value]]
+
+	return map[string]interface{}{
+		er.Value: val,
+	}
+}
+
+func getIDProperty(props []PropertyMapping, colIdx map[string]int, record []string) string {
+	return record[colIdx[props[0].ColName]]
+}
+
+func mapProperties(props []PropertyMapping, colIdx map[string]int, record []string) map[string]interface{} {
+	result := make(map[string]interface{})
+	for _, pm := range props {
+		result[pm.ColName] = getValue(pm, record, colIdx)
+	}
+	return result
+}
+
+func getValue(pm PropertyMapping, record []string, colIdx map[string]int) interface{} {
+
+	value := record[colIdx[pm.ColName]]
+	// TODO: refactor to be able to use custom converter from
+	// property mappping
+	return convertValue(value, pm.Type)
+}
+
+func convertValue(value string, valueType string) interface{} {
+	switch valueType {
+	case "numeric":
+		floatVal, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			return false, err
+			log.Fatal(err)
 		}
-		if !match {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func filterMatch(filter string, colMap map[string]int, data []string) (bool, error) {
-	parts := strings.Split(filter, " ")
-	switch parts[1] {
-	case "==":
-		return data[colMap[parts[0]]] == parts[2], nil
-	case "!=":
-		return data[colMap[parts[0]]] != parts[2], nil
-	case ">":
-		return data[colMap[parts[0]]] > parts[2], nil
-	case "<":
-		return data[colMap[parts[0]]] < parts[2], nil
-	default:
-		return false, fmt.Errorf("Unknown operator: %v", parts[1])
-	}
-}
-
-func processNodes(config File, data []string) (int, error) {
-	// WriteHeader
-	for _, nodeMapping := range config.Nodes {
-		buffer, exists := buffers[nodeMapping.Label]
-		if !exists {
-			buffer = &bytes.Buffer{}
-			buffers[nodeMapping.Label] = buffer
-			writeHeader(buffer, nodeMapping.Label, nodeMapping.GetPropertyNames())
-		}
-		_, err := processNode(nodeMapping, config.ColumNameIndexMap(), data, buffer)
+		return floatVal
+	case "bool":
+		boolVal, err := strconv.ParseBool(value)
 		if err != nil {
-			return 0, err
+			log.Fatal(err)
 		}
+		return boolVal
+	case "string":
+		return value
 	}
-	return 0, nil
-}
-
-func processNode(mapping NodeMapping, colMap map[string]int, data []string, buf *bytes.Buffer) (int, error) {
-	// evalute filters
-	match, err := filtersMatch(mapping.Filters, colMap, data)
-	if err != nil {
-		return 0, err
-	}
-	if !match {
-		return 0, nil
-	}
-	// Use first column as id when caching
-	idCache.Put(mapping.Label, data[colMap[mapping.Properties[0].ColName]])
-	counters[mapping.Label]++
-	return processProperties(mapping.Properties, colMap, data, buf)
-}
-
-func processRelations(config File, data []string) (int, error) {
-	for _, relMapping := range config.Relations {
-		buffer, exists := buffers[relMapping.Label]
-		if !exists {
-			buffer = &bytes.Buffer{}
-			buffers[relMapping.Label] = buffer
-			writeHeader(buffer, relMapping.Label, relMapping.GetPropertyNames())
-		}
-		_, err := processRelation(relMapping, config.ColumNameIndexMap(), data, buffer)
-		if err != nil {
-			return 0, err
-		}
-	}
-	return 0, nil
-}
-
-func processRelation(mapping RelationMapping, colMap map[string]int, data []string, buf *bytes.Buffer) (int, error) {
-	match, err := filtersMatch(mapping.Filters, colMap, data)
-	if err != nil {
-		return 0, err
-	}
-	if !match {
-		return 0, nil
-	}
-	srcId, err := idCache.Get(mapping.Src.Label, data[colMap[mapping.Src.Value]])
-	if err != nil {
-		return 0, err
-	}
-	err = binary.Write(buf, binary.LittleEndian, uint32(srcId))
-	if err != nil {
-		return 0, err
-	}
-	dstId, err := idCache.Get(mapping.Dst.Label, data[colMap[mapping.Dst.Value]])
-	if err != nil {
-		return 0, err
-	}
-	err = binary.Write(buf, binary.LittleEndian, uint32(dstId))
-	if err != nil {
-		return 0, err
-	}
-	counters[mapping.Label]++
-	return processProperties(mapping.Properties, colMap, data, buf)
-}
-
-func processProperties(props []PropertyMapping, colMap map[string]int, data []string, buf *bytes.Buffer) (int, error) {
-	if len(data) < len(props) {
-		return 0, fmt.Errorf("Data contains fewer columns that mapping.")
-	}
-	for _, propMap := range props {
-		val := data[colMap[propMap.ColName]]
-		switch propMap.Type {
-		case "numeric":
-			floatVal, err := strconv.ParseFloat("3.1415", 64)
-			if err != nil {
-				return 0, err
-			}
-			err = binary.Write(buf, binary.LittleEndian, BI_NUMERIC)
-			if err != nil {
-				return 0, err
-			}
-			err = binary.Write(buf, binary.LittleEndian, floatVal)
-			if err != nil {
-				return 0, err
-			}
-		case "bool":
-			boolVal, err := strconv.ParseBool(val)
-			if err != nil {
-				return 0, err
-			}
-			err = binary.Write(buf, binary.LittleEndian, BI_BOOL)
-			if err != nil {
-				return 0, err
-			}
-			err = binary.Write(buf, binary.LittleEndian, boolVal)
-			if err != nil {
-				return 0, err
-			}
-		case "string":
-			err := binary.Write(buf, binary.LittleEndian, BI_STRING)
-			if err != nil {
-				return 0, err
-			}
-			err = binary.Write(buf, binary.LittleEndian, []byte(val))
-			if err != nil {
-				return 0, err
-			}
-			err = binary.Write(buf, binary.LittleEndian, uint8(0x00))
-			if err != nil {
-				return 0, err
-			}
-		default:
-			return 0, fmt.Errorf("Unknown datatype: %v", propMap.Type)
-		}
-	}
-	return 1, nil
-}
-
-func writeHeader(buf *bytes.Buffer, label string, propNames []string) error {
-	var err error
-	// label
-	err = binary.Write(buf, binary.LittleEndian, []byte(string(label)))
-	if err != nil {
-		return err
-	}
-	err = binary.Write(buf, binary.LittleEndian, uint8(0x00))
-	if err != nil {
-		return err
-	}
-
-	// propertyCount
-	err = binary.Write(buf, binary.LittleEndian, uint32(len(propNames)))
-	if err != nil {
-		return err
-	}
-
-	// property names
-	for _, propName := range propNames {
-		err = binary.Write(buf, binary.LittleEndian, []byte(propName))
-		if err != nil {
-			return err
-		}
-		err = binary.Write(buf, binary.LittleEndian, uint8(0x00))
-		if err != nil {
-			return err
-		}
-	}
-	log.Printf("Header written: [:%v {%v}", label, propNames)
 	return nil
-}
-
-func processRow(config File, row []string, rowNum int64) error {
-	_, err := processNodes(config, row)
-	if err != nil {
-		return err
-	}
-	_, err = processRelations(config, row)
-	if err != nil {
-		return err
-	}
-	flushBuffers(false, config)
-	return nil
-}
-
-// flushBuffers flushes buffers
-func flushBuffers(force bool, config File) {
-	log.Printf("Flushing nodes")
-	for _, nm := range config.Nodes {
-		count := counters[nm.Label]
-		if force || (count > 0 && count%50000 == 0) {
-			buffer := buffers[nm.Label]
-			log.Printf("Sending nodes buffer: %20v [count: %6v size: %6v]", nm.Label, count, buffer.Len())
-			sendNodes(redisConn, buffer.Bytes(), count)
-
-			buffer.Reset()
-			counters[nm.Label] = 0
-			err := writeHeader(buffer, nm.Label, nm.GetPropertyNames())
-			if err != nil {
-				log.Fatalf("Error writing header: %v", err)
-			}
-		}
-	}
-
-	log.Printf("Flushing relations")
-	for _, rm := range config.Relations {
-		count := counters[rm.Label]
-		if force || (count > 0 && count%20000 == 0) {
-			buffer := buffers[rm.Label]
-			log.Printf("Sending relations buffer: %20v [count: %6v size: %6v]", rm.Label, count, buffer.Len())
-			sendRelations(redisConn, buffer.Bytes(), count)
-			buffer.Reset()
-			counters[rm.Label] = 0
-			err := writeHeader(buffer, rm.Label, rm.GetPropertyNames())
-			if err != nil {
-				log.Fatalf("Error writing header: %v", err)
-			}
-		}
-	}
-
-}
-
-func sendRelations(conn redis.Conn, buf []byte, count int) {
-	var args = []interface{}{
-		"GIM",
-	}
-
-	if sendBegin == true {
-		args = append(args, []interface{}{"BEGIN", 0, count, 0, 1, buf}...)
-		sendBegin = false
-	} else {
-		args = append(args, []interface{}{0, count, 0, 1, buf}...)
-	}
-
-	if err := conn.Send("GRAPH.BULK", args...); err != nil {
-		log.Fatal(err)
-	}
-	if err := conn.Flush(); err != nil {
-		log.Fatal(err)
-	}
-	reply, err := conn.Receive()
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("%v", reply)
-
-}
-
-func sendNodes(conn redis.Conn, buf []byte, count int) {
-	var args = []interface{}{
-		"GIM",
-	}
-
-	if sendBegin == true {
-		args = append(args, []interface{}{"BEGIN", count, 0, 1, 0, buf}...)
-		sendBegin = false
-	} else {
-		args = append(args, []interface{}{count, 0, 1, 0, buf}...)
-	}
-
-	if err := conn.Send("GRAPH.BULK", args...); err != nil {
-		log.Fatal(err)
-	}
-	if err := conn.Flush(); err != nil {
-		log.Fatal(err)
-	}
-	reply, err := conn.Receive()
-	if err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("%s", reply)
-
-}
-
-func printBuffers() {
-	for key, val := range buffers {
-		log.Printf("buffer %v: size: %v count: %v", key, val.Cap(), counters[key])
-	}
-}
-
-func processFile(config File) (int64, error) {
-	log.Printf("Processing: %v", config.Filename)
-	row := int64(0)
-	csvReader, err := getReader(config.Filename, config.Separator)
-	if err != nil {
-		return row, err
-	}
-
-	// If file has Headers, skip first row
-	if config.Header {
-		_, err := csvReader.Read()
-		if err != nil {
-			return 0, err
-		}
-	}
-
-	for {
-		record, err := csvReader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return 0, err
-		}
-		err = processRow(config, record, row)
-		if err != nil {
-			return row, err
-		}
-		row++
-
-	}
-	flushBuffers(true, config)
-	log.Printf("Processed: %v", row)
-	return 0, nil
-}
-
-func EnvString(key string, val string) string {
-	if len(os.Getenv(key)) > 0 {
-		return os.Getenv(key)
-	}
-	return val
-}
-
-func EnvInt(key string, val int) int {
-	var retval int
-	var err error
-	if len(os.Getenv(key)) > 0 {
-		retval, err = strconv.Atoi(os.Getenv(key))
-		if err != nil {
-			retval = val
-		}
-	} else {
-		retval = val
-	}
-	return retval
-}
-
-var (
-	// global node index
-	idCache   IdCache                  = NewIdCache()
-	buffers   map[string]*bytes.Buffer = make(map[string]*bytes.Buffer)
-	counters  map[string]int           = make(map[string]int)
-	redisConn redis.Conn               = nil
-	sendBegin bool                     = true
-)
-
-func main() {
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: redis_import2pg <configfile>\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-	if len(os.Args) < 2 {
-		flag.Usage()
-		os.Exit(1)
-	}
-
-	conf, err := NewConfig(os.Args[1])
-	if err != nil {
-		log.Fatalf("Error reading configuration: %v", err)
-	}
-
-	redisConn, err = redis.Dial("tcp", conf.Redis.Url)
-	if err != nil {
-		log.Fatalf("Error connectig to redis: %v", err)
-	}
-
-	for _, file := range conf.Files {
-		_, err := processFile(file)
-		if err != nil {
-			log.Fatalf("Unable to process file: %v", err)
-		}
-	}
-	redisConn.Close()
 }

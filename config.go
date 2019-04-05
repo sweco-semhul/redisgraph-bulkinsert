@@ -8,6 +8,10 @@ import (
 	yaml "gopkg.in/yaml.v2"
 )
 
+/*
+
+ */
+
 type Config struct {
 	Redis Redis
 	Files []File
@@ -25,8 +29,8 @@ type File struct {
 	Separator string
 	Header    bool
 	Columns   []string
-	Nodes     []NodeMapping
-	Relations []RelationMapping
+	Nodes     map[string]NodeMapping
+	Edges     map[string]EdgeMapping
 }
 
 func (f File) ColumNameIndexMap() map[string]int {
@@ -38,7 +42,7 @@ func (f File) ColumNameIndexMap() map[string]int {
 }
 
 type NodeMapping struct {
-	Label      string
+	//Label      string
 	Filters    []string
 	Properties []PropertyMapping
 }
@@ -51,15 +55,15 @@ func (nm NodeMapping) GetPropertyNames() []string {
 	return result
 }
 
-type RelationMapping struct {
-	Label      string
+type EdgeMapping struct {
+	//Label      string
 	Filters    []string
 	Src        EntityReference
 	Dst        EntityReference
 	Properties []PropertyMapping
 }
 
-func (rm RelationMapping) GetPropertyNames() []string {
+func (rm EdgeMapping) GetPropertyNames() []string {
 	var result []string
 	for _, val := range rm.Properties {
 		result = append(result, val.ColName)
