@@ -1,0 +1,122 @@
+  redis:
+    url: "localhost:6379"
+    # username: ""
+    # password: ""
+    graphname: "GIM"
+
+  files:
+    - filename: "/Users/erik/git/redisgraph-bulkinsert/examples/debug/Addresses.csv"
+      separator: "\t"
+      header: false
+      columns:       
+      - ADD_ID
+      - ADDC_ID
+      - ORIG_ID
+      - ACTIVE_FROM
+      - ACTIVE_TO
+      - FOREIGN_LINE1
+      - FOREIGN_LINE2
+      - FOREIGN_LINE3
+      - FOREIGN_LINE4
+      - FOREIGN_LINE5
+      - FOREIGN_LINE6
+      - ADMIN_DETAIL
+      - HHT_ID
+      - NUMBER
+      - NUMBERSUFFIX
+      - STAIRWAYIDENTIFIER
+      - FLOORIDENTIFIER
+      - DOORIDENTIFIER
+      - BUILDINGNUMBER
+      - CREATED_DT
+      nodes:
+        Address:
+          # filters:
+          #  - "area_category_id < 3"
+          properties:
+            - colname: "ADD_ID"
+              type: "long"
+            - colname: "ACTIVE_FROM"
+              type: "string"
+            - colname: "ACTIVE_TO"
+              type: "string"   
+
+    - filename: "/Users/erik/git/redisgraph-bulkinsert/examples/debug/ProductionPoints.csv"
+      separator: "\t"
+      header: false
+      columns:
+      - PP_ID  
+      - PPC_ID  
+      - ORIG_ID 
+      - ACTIVE_FROM     
+      - ACTIVE_TO       
+      - NAME    
+      - WGS84_LATITUDE_DECIDEG  
+      - WGS84_LONGITUDE_DECIDEG 
+      - METERSABOVESEALEVEL     
+      - CREATED_DT
+      nodes:      
+        ProductionPoint:
+          properties:
+            - colname: "PP_ID"
+              type: "long"
+            - colname: "PPC_ID"
+              type: "long"
+            - colname: "ACTIVE_FROM"
+              type: "string"
+            - colname: "ACTIVE_TO"
+              type: "string"     
+            - colname: "WGS84_LATITUDE_DECIDEG"
+              type: "double"
+            - colname: "WGS84_LONGITUDE_DECIDEG"
+              type: "double" 
+
+    - filename: "/Users/erik/git/redisgraph-bulkinsert/examples/debug/ProductionPointAddressRelations.csv"
+      separator: "\t"
+      header: false
+      columns:
+      - PP_ID
+      - ACTIVE_FROM
+      - ACTIVE_TO
+      - ADD_ID
+      - LNKT_ID
+      edges:
+        ProductionPointAddress:
+          src: 
+            label: "ProductionPoint"
+            value: "PP_ID"
+          dst:
+            label: "Address"
+            value: "ADD_ID"
+          properties: 
+            - colname: "ACTIVE_FROM"
+              type: "string"
+            - colname: "ACTIVE_TO"
+              type: "string"
+            - colname: "LNKT_ID"
+              type: "long"
+
+    - filename: "/Users/erik/git/redisgraph-bulkinsert/examples/debug/ProductionPointProductionPointRelations.csv"
+      separator: "\t"
+      header: false
+      columns:
+      - PP_ID
+      - ACTIVE_FROM 
+      - ACTIVE_TO
+      - PP_ID2
+      - LNKT_ID
+      edges:
+        ProductionPointProductionPoint:
+          src: 
+            label: "ProductionPoint"
+            value: "PP_ID"
+          dst:
+            label: "ProductionPoint"
+            value: "PP_ID2"
+          properties: 
+            - colname: "ACTIVE_FROM"
+              type: "string"
+            - colname: "ACTIVE_TO"
+              type: "string"
+            - colname: "LNKT_ID"
+              type: "long"

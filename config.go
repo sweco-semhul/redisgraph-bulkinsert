@@ -42,7 +42,6 @@ func (f File) ColumNameIndexMap() map[string]int {
 }
 
 type NodeMapping struct {
-	//Label      string
 	Filters    []string
 	Properties []PropertyMapping
 }
@@ -56,7 +55,6 @@ func (nm NodeMapping) GetPropertyNames() []string {
 }
 
 type EdgeMapping struct {
-	//Label      string
 	Filters    []string
 	Src        EntityReference
 	Dst        EntityReference

@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/gomodule/redigo/redis"
@@ -19,7 +18,7 @@ import (
 
 func main() {
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: redis_import2pg <configfile>\n")
+		fmt.Fprintf(os.Stderr, "Usage: redisgraph_bulkimport <configfile>\n")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -37,120 +36,46 @@ func main() {
 
 }
 
-type Node struct {
-	ID         string
-	Alias      string
-	Label      string
-	Properties map[string]interface{}
-}
-
-func (n Node) Cypher() string {
-	var str strings.Builder
-	str.WriteString("(")
-	str.WriteString(n.Alias)
-	str.WriteString(":")
-	str.WriteString(n.Label)
-	str.WriteString(" ")
-	str.WriteString("{")
-	p := make([]string, 0, len(n.Properties))
-	for k, v := range n.Properties {
-		switch val := v.(type) {
-		case string:
-			p = append(p, fmt.Sprintf("%s:\"%s\"", k, val))
-		case float64, float32:
-			p = append(p, fmt.Sprintf("%s:%f", k, val))
-		default:
-			p = append(p, fmt.Sprintf("%s:%v", k, val))
-		}
-	}
-	str.WriteString(strings.Join(p, ", "))
-	str.WriteString("}")
-	str.WriteString(")")
-	return str.String()
-}
-
-type Edge struct {
-	Label       string
-	Properties  map[string]interface{}
-	SrcLabel    string
-	SrcProperty map[string]interface{}
-	DstLabel    string
-	DstProperty map[string]interface{}
-}
-
-func (e Edge) Cypher() string {
-	var str strings.Builder
-	src := Node{
-		Alias:      "src",
-		Label:      e.SrcLabel,
-		Properties: e.SrcProperty,
-	}
-	dst := Node{
-		Alias:      "dst",
-		Label:      e.DstLabel,
-		Properties: e.DstProperty,
-	}
-	str.WriteString("MATCH ")
-	str.WriteString(src.Cypher())
-	str.WriteString(",")
-	str.WriteString(dst.Cypher())
-	str.WriteString(" CREATE ")
-	str.WriteString("(src)")
-	str.WriteString("-[:")
-	str.WriteString(e.Label)
-	str.WriteString("]->")
-	str.WriteString("(dst)")
-	return str.String()
-}
-
 func process(config Config) {
 	impb := NewImportBuffers()
 
-	for _, fileConfig := range config.Files {
-		impb.AddConfigs(fileConfig)
-		entityChan := processRecord(readFile(fileConfig), fileConfig)
-		//writeData(entityChan, config.Redis, fileConfig)
-		BulkInsert(entityChan, config.Redis, fileConfig, impb)
-	}
-}
-
-func BulkInsert(entityChan chan interface{}, redisConf Redis, fileConf File, impb *ImportBuffers) {
-	conn, err := redis.Dial("tcp", redisConf.Url)
+	conn, err := redis.Dial("tcp", config.Redis.Url)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer conn.Close()
 
-	executeQuery("GRAPH.QUERY", redisConf.GraphName, "CREATE (:Import{id: 1})", conn)
+	for _, fileConfig := range config.Files {
+		impb.SetConfig(fileConfig)
+		entityChan := processRecord(readFile(fileConfig), fileConfig)
+		BulkInsert(entityChan, fileConfig, config.Redis.GraphName, impb, conn)
+	}
+}
 
+func BulkInsert(entityChan chan interface{}, fileConf File, graphName string, impb *ImportBuffers, conn redis.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
+		var count = 0
 		for entity := range entityChan {
-			var count, size int
+			count++
 			switch val := entity.(type) {
 			case Node:
-				count, size = impb.AddNode(val)
+				impb.AddNode(val)
 			case Edge:
-				count, size = impb.AddEdge(val)
+				impb.AddEdge(val)
 			}
-			if count%10000 == 0 {
-				log.Printf("count: %v  size: %v", count, size)
+			if count%100000 == 0 {
+				log.Printf("count: %v", count)
 				impb.PrettyPrint()
+				executeQuery("GRAPH.BULK", impb.WriteQuery(graphName), conn)
 			}
 		}
 		impb.PrettyPrint()
+		executeQuery("GRAPH.BULK", impb.WriteQuery(graphName), conn)
 		wg.Done()
 	}()
 	wg.Wait()
-}
-
-func writeNode() {
-
-}
-
-func writeEdge() {
-
 }
 
 func MergeInsert(entityChan chan interface{}, redisConf Redis, fileConf File) {
@@ -164,24 +89,25 @@ func MergeInsert(entityChan chan interface{}, redisConf Redis, fileConf File) {
 		if err != nil {
 			log.Fatal(err)
 		}
-
-		// Create import object (which also creates the graph)
-		executeQuery("GRAPH.QUERY", redisConf.GraphName, "CREATE (:Import {start: '', end: ''})", conn)
-		for label, nodeConf := range fileConf.Nodes {
-			query := fmt.Sprintf("CREATE INDEX ON :%v(%v)", label, nodeConf.Properties[0].ColName)
-			executeQuery("GRAPH.QUERY", redisConf.GraphName, query, conn)
-		}
-
-		for entity := range entityChan {
-			switch v := entity.(type) {
-			case Node:
-				query := fmt.Sprintf("MERGE %v", v.Cypher())
-				executeQuery("GRAPH.QUERY", redisConf.GraphName, query, conn)
-			case Edge:
-				query := fmt.Sprintf("%v", v.Cypher())
+		/*
+			// Create import object (which also creates the graph)
+			executeQuery("GRAPH.QUERY", redisConf.GraphName, "CREATE (:Import {start: '', end: ''})", conn)
+			for label, nodeConf := range fileConf.Nodes {
+				query := fmt.Sprintf("CREATE INDEX ON :%v(%v)", label, nodeConf.Properties[0].ColName)
 				executeQuery("GRAPH.QUERY", redisConf.GraphName, query, conn)
 			}
-		}
+
+			for entity := range entityChan {
+				switch v := entity.(type) {
+				case Node:
+					query := fmt.Sprintf("MERGE %v", v.Cypher())
+					executeQuery("GRAPH.QUERY", redisConf.GraphName, query, conn)
+				case Edge:
+					query := fmt.Sprintf("%v", v.Cypher())
+					executeQuery("GRAPH.QUERY", redisConf.GraphName, query, conn)
+				}
+			}
+		*/
 		wg.Done()
 	}()
 
@@ -190,16 +116,21 @@ func MergeInsert(entityChan chan interface{}, redisConf Redis, fileConf File) {
 
 //
 
-func executeQuery(cmd string, graphname string, query string, conn redis.Conn) {
+func executeQuery(cmd string, query []interface{}, conn redis.Conn) {
 	//log.Printf("execute: %v", query)
-	r, err := redis.Values(conn.Do(cmd, graphname, query))
+	r, err := conn.Do(cmd, query...)
 	if err != nil {
 		log.Fatalf("Error executing [%v]: %v", query, err)
 	}
-	_, err = redis.Values(r[0], nil)
-	if err != nil {
-		log.Fatal(err)
-	}
+	log.Printf("redis response: %s", r)
+	//if err := conn.Flush(); err != nil {
+	//	log.Fatal(err)
+	//}
+
+	//_, err = redis.Values(r[0], nil)
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
 	//log.Printf("result: %v", results)
 }
 
@@ -301,27 +232,24 @@ func processRecord(recordChan chan []string, config File) chan interface{} {
 				}
 			}
 			for label, conf := range config.Edges {
+				var srcID = record[colIdx[conf.Src.Value]]
+				var dstID = record[colIdx[conf.Dst.Value]]
+
 				entityChan <- Edge{
 					Label:       label,
 					Properties:  mapProperties(conf.Properties, colIdx, record),
 					SrcLabel:    conf.Src.Label,
-					SrcProperty: getReferenceProperty(conf.Src, colIdx, record),
+					SrcID:       srcID,
+					SrcProperty: map[string]interface{}{conf.Src.Value: srcID},
 					DstLabel:    conf.Dst.Label,
-					DstProperty: getReferenceProperty(conf.Dst, colIdx, record),
+					DstID:       dstID,
+					DstProperty: map[string]interface{}{conf.Dst.Value: dstID},
 				}
 			}
 		}
 		close(entityChan)
 	}()
 	return entityChan
-}
-
-func getReferenceProperty(er EntityReference, colIdx map[string]int, record []string) map[string]interface{} {
-	val := record[colIdx[er.Value]]
-
-	return map[string]interface{}{
-		er.Value: val,
-	}
 }
 
 func getIDProperty(props []PropertyMapping, colIdx map[string]int, record []string) string {
@@ -346,12 +274,20 @@ func getValue(pm PropertyMapping, record []string, colIdx map[string]int) interf
 
 func convertValue(value string, valueType string) interface{} {
 	switch valueType {
-	case "numeric":
+	case "double":
 		floatVal, err := strconv.ParseFloat(value, 64)
 		if err != nil {
-			log.Fatal(err)
+			return 0.0
+			//log.Fatal(err)
 		}
 		return floatVal
+	case "long":
+		intVal, err := strconv.ParseInt(value, 10, 64)
+		if err != nil {
+			return 0
+			//log.Fatal(err)
+		}
+		return intVal
 	case "bool":
 		boolVal, err := strconv.ParseBool(value)
 		if err != nil {
